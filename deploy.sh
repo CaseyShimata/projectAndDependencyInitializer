@@ -243,8 +243,8 @@ install_xcode_tools() {
     progress "Installing/Checking Xcode Command Line Tools"
 
     if xcode-select -p >/dev/null 2>&1; then
-        success "Xcode Command Line Tools already installed at $(xcode-select -p)"
-        return
+      success "Xcode Command Line Tools already installed at "$(xcode-select -p)
+      return
     fi
 
     if /usr/sbin/pkgutil --pkg-info=com.apple.pkg.CLTools_Executables >/dev/null 2>&1; then
@@ -364,16 +364,11 @@ main() {
 
     verify_installations
     
-    info "Next steps:"
-    if [ "$SHELL" != "$(command -v zsh)" ]; then
+    info "Possible Next steps:"
         info "1. Set zsh as default shell: chsh -s $(command -v zsh)"
         info "2. Restart terminal for shell changes to take effect"
         info "3. Run 'claude auth' to configure Claude Code CLI"
         info "4. Configure Rectangle shortcuts in System Preferences"
-    else
-        info "1. Run 'claude auth' to configure Claude Code CLI"
-        info "2. Configure Rectangle shortcuts in System Preferences"
-    fi
 }
 
 main "$@"
