@@ -4,8 +4,17 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PAT
 set -e
 
 readonly SCRIPT_VERSION="1.0.0"
-readonly RED=$'\033[0;31m' GREEN=$'\033[0;32m' YELLOW=$'\033[1;33m'
-readonly BLUE=$'\033[0;34m' CYAN=$'\033[0;36m' NC=$'\033[0m'
+
+# Source shared functions
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/.functions.sh"
+
+readonly FORMULA_PACKAGES=(
+    "mas:Mac App Store CLI"
+    "node:Node.js"
+    "yarn:Yarn"
+    "git-flow:Git Flow"
+)
 
 readonly CASK_PACKAGES=(
     "google-chrome:Google Chrome"
@@ -15,12 +24,6 @@ readonly CASK_PACKAGES=(
     "intellij-idea:IntelliJ IDEA Ultimate"
     "rectangle:Rectangle"
     "iterm2:iTerm2"
-)
-
-readonly FORMULA_PACKAGES=(
-    "node:Node.js"
-    "yarn:Yarn"
-    "git-flow:Git Flow"
 )
 
 readonly NPM_PACKAGES=(
@@ -33,17 +36,6 @@ TOTAL_STEPS=$((4 + ${#CASK_PACKAGES[@]} + ${#FORMULA_PACKAGES[@]} + ${#NPM_PACKA
 UPGRADE_MODE=false
 OS_TYPE=""
 ARCH=""
-
-msg() { printf '%s%s%s\n' "${2:-$GREEN}" "$1" "$NC"; }
-progress() {
-    CURRENT_STEP=$((CURRENT_STEP + 1))
-    local elapsed=$(( $(/bin/date +%s 2>/dev/null || echo 0) - START_TIME ))
-    printf '%s[%d/%d] [%02d:%02d] %s%s\n' "$BLUE" "$CURRENT_STEP" "$TOTAL_STEPS" $((elapsed/60)) $((elapsed%60)) "$1" "$NC"
-}
-error() { msg "$1" "$RED"; exit 1; }
-success() { msg "$1"; }
-warn() { msg "$1" "$YELLOW"; }
-info() { msg "$1" "$CYAN"; }
 
 detect_os() {
     case "$(uname)" in
@@ -210,15 +202,15 @@ install_packages() {
         brew update --quiet && brew upgrade --quiet
     fi
 
+    for package in "${FORMULA_PACKAGES[@]}"; do
+        local name="${package%:*}" display="${package#*:}"
+        install_tool "$name" "$display" "brew list '$name'" "brew install '$name' --quiet" "brew upgrade '$name' --quiet"
+    done
+
     for package in "${CASK_PACKAGES[@]}"; do
         [ "$OS_TYPE" != "macos" ] && continue
         local name="${package%:*}" display="${package#*:}"
         install_tool "$name" "$display" "brew list --cask '$name'" "brew install --cask '$name' --quiet" "brew upgrade --cask '$name' --quiet"
-    done
-
-    for package in "${FORMULA_PACKAGES[@]}"; do
-        local name="${package%:*}" display="${package#*:}"
-        install_tool "$name" "$display" "brew list '$name'" "brew install '$name' --quiet" "brew upgrade '$name' --quiet"
     done
 
     for package in "${NPM_PACKAGES[@]}"; do
@@ -237,53 +229,39 @@ install_packages() {
     done
 }
 
-install_xcode_tools() {
+install_xcode() {
     [ "$OS_TYPE" != "macos" ] && return
-
-    progress "Installing/Checking Xcode Command Line Tools"
-
-    if xcode-select -p >/dev/null 2>&1; then
-        success "Xcode Command Line Tools already installed at $(xcode-select -p)"
-        return
-    fi
-
-    if /usr/sbin/pkgutil --pkg-info=com.apple.pkg.CLTools_Executables >/dev/null 2>&1; then
-        success "Xcode Command Line Tools already installed (verified via pkgutil)"
-        return
-    fi
-
-    info "Attempting to install Xcode Command Line Tools"
-
-    /usr/bin/touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress 2>/dev/null || true
-
-    info "Checking for available Xcode Command Line Tools updates"
-    local prod
-    prod="$(softwareupdate --list 2>&1 | /usr/bin/grep "\*.*Command Line Tools" | /usr/bin/tail -1 | /usr/bin/awk -F'[*] ' '{print $2}')"
-
-    if [ -n "$prod" ]; then
-        info "Found package: $prod"
-        if softwareupdate --install "$prod" --agree-to-license 2>/dev/null; then
-            success "Xcode Command Line Tools installed"
+    progress "Installing Xcode for Expo development"
+    
+    if [ ! -d "/Library/Developer/CommandLineTools" ]; then
+        info "Installing Command Line Tools via Software Update"
+        /usr/bin/touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+        PROD=$(/usr/sbin/softwareupdate -l | /usr/bin/grep "\*.*Command Line" | /usr/bin/tail -n 1 | /usr/bin/sed 's/^[^C]* //')
+        if [ -n "$PROD" ]; then
+            /usr/sbin/softwareupdate -i "$PROD" --verbose
+            success "Command Line Tools installed"
         else
-            info "Automated installation requires sudo. Triggering GUI installer instead"
-            xcode-select --install 2>/dev/null || true
-            warn "Xcode Command Line Tools installation dialog triggered"
-            warn "Please complete the installation in the popup window"
-            warn "Or run manually with sudo: softwareupdate --install '$prod' --agree-to-license"
+            warn "Command Line Tools not available via Software Update"
         fi
+        /bin/rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
     else
-        info "Could not find Command Line Tools in software updates. Triggering GUI installer"
-        if xcode-select --install 2>/dev/null; then
-            warn "Xcode Command Line Tools installation dialog should appear"
-            warn "Please complete the installation in the popup window"
-        else
-            warn "Could not trigger installer. You may need to:"
-            warn "1. Download from: https://developer.apple.com/xcode/resources/"
-            warn "2. Or install full Xcode from the App Store"
-        fi
+        success "Command Line Tools already installed"
+    fi
+    
+    if [ ! -d "/Applications/Xcode.app" ]; then
+        info "Installing Xcode from App Store (this may take a while...)"
+        mas install 497799835 || warn "Failed to install Xcode - install manually from App Store"
     fi
 
-    /bin/rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress 2>/dev/null || true
+    if [ -d "/Applications/Xcode.app" ] && command -v xcodebuild >/dev/null 2>&1; then
+        if ! /usr/bin/xcodebuild -license check >/dev/null 2>&1; then
+            info "Accepting Xcode license"
+            /usr/bin/sudo /usr/bin/xcodebuild -license accept
+        fi
+        success "Xcode ready"
+    else
+        success "Using Command Line Tools only"
+    fi
 }
 
 verify_installations() {
@@ -356,7 +334,7 @@ main() {
     msg "Phase 2: Configuring shell and installing packages" "$CYAN"
     install_oh_my_zsh
     install_packages
-    install_xcode_tools
+    install_xcode
 
     local elapsed=$(( $(/bin/date +%s 2>/dev/null || echo 0) - START_TIME ))
     msg "Setup Complete!" "$GREEN"
@@ -364,16 +342,11 @@ main() {
 
     verify_installations
     
-    info "Next steps:"
-    if [ "$SHELL" != "$(command -v zsh)" ]; then
+    info "Possible Next steps:"
         info "1. Set zsh as default shell: chsh -s $(command -v zsh)"
         info "2. Restart terminal for shell changes to take effect"
         info "3. Run 'claude auth' to configure Claude Code CLI"
         info "4. Configure Rectangle shortcuts in System Preferences"
-    else
-        info "1. Run 'claude auth' to configure Claude Code CLI"
-        info "2. Configure Rectangle shortcuts in System Preferences"
-    fi
 }
 
 main "$@"
