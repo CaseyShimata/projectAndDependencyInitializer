@@ -4,8 +4,10 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PAT
 set -e
 
 readonly SCRIPT_VERSION="1.0.0"
-readonly RED=$'\033[0;31m' GREEN=$'\033[0;32m' YELLOW=$'\033[1;33m'
-readonly BLUE=$'\033[0;34m' CYAN=$'\033[0;36m' NC=$'\033[0m'
+
+# Source shared functions
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/.functions.sh"
 
 readonly FORMULA_PACKAGES=(
     "mas:Mac App Store CLI"
@@ -34,17 +36,6 @@ TOTAL_STEPS=$((4 + ${#CASK_PACKAGES[@]} + ${#FORMULA_PACKAGES[@]} + ${#NPM_PACKA
 UPGRADE_MODE=false
 OS_TYPE=""
 ARCH=""
-
-msg() { printf '%s%s%s\n' "${2:-$GREEN}" "$1" "$NC"; }
-progress() {
-    CURRENT_STEP=$((CURRENT_STEP + 1))
-    local elapsed=$(( $(/bin/date +%s 2>/dev/null || echo 0) - START_TIME ))
-    printf '%s[%d/%d] [%02d:%02d] %s%s\n' "$BLUE" "$CURRENT_STEP" "$TOTAL_STEPS" $((elapsed/60)) $((elapsed%60)) "$1" "$NC"
-}
-error() { msg "$1" "$RED"; exit 1; }
-success() { msg "$1"; }
-warn() { msg "$1" "$YELLOW"; }
-info() { msg "$1" "$CYAN"; }
 
 detect_os() {
     case "$(uname)" in
@@ -248,40 +239,28 @@ install_xcode() {
         PROD=$(/usr/sbin/softwareupdate -l | /usr/bin/grep "\*.*Command Line" | /usr/bin/tail -n 1 | /usr/bin/sed 's/^[^C]* //')
         if [ -n "$PROD" ]; then
             /usr/sbin/softwareupdate -i "$PROD" --verbose
-            /bin/rm /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
             success "Command Line Tools installed"
         else
-            /bin/rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
             warn "Command Line Tools not available via Software Update"
         fi
+        /bin/rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
     else
         success "Command Line Tools already installed"
     fi
     
-    if [ -d "/Applications/Xcode.app" ]; then
-        success "Xcode already installed"
-        
-        if command -v xcodebuild >/dev/null 2>&1; then
-            if ! /usr/bin/xcodebuild -license check >/dev/null 2>&1; then
-                info "Accepting Xcode license"
-                /usr/bin/sudo /usr/bin/xcodebuild -license accept
-            else
-                success "Xcode license already accepted"
-            fi
-        else
-            success "Using Command Line Tools only"
-        fi
-    else
+    if [ ! -d "/Applications/Xcode.app" ]; then
         info "Installing Xcode from App Store (this may take a while...)"
-        if mas install 497799835; then
-            success "Xcode installed"
-            if command -v xcodebuild >/dev/null 2>&1; then
-                info "Accepting Xcode license"
-                /usr/bin/sudo /usr/bin/xcodebuild -license accept
-            fi
-        else
-            warn "Failed to install Xcode - install manually from App Store"
+        mas install 497799835 || warn "Failed to install Xcode - install manually from App Store"
+    fi
+
+    if [ -d "/Applications/Xcode.app" ] && command -v xcodebuild >/dev/null 2>&1; then
+        if ! /usr/bin/xcodebuild -license check >/dev/null 2>&1; then
+            info "Accepting Xcode license"
+            /usr/bin/sudo /usr/bin/xcodebuild -license accept
         fi
+        success "Xcode ready"
+    else
+        success "Using Command Line Tools only"
     fi
 }
 
