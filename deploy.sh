@@ -9,11 +9,19 @@ readonly SCRIPT_VERSION="1.0.0"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/.functions.sh"
 
+# Progress function for this script
+progress() {
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    local elapsed=$(( $(/bin/date +%s 2>/dev/null || echo 0) - START_TIME ))
+    printf '%s[%d/%d] [%02d:%02d] %s%s\n' "$BLUE" "$CURRENT_STEP" "$TOTAL_STEPS" $((elapsed/60)) $((elapsed%60)) "$1" "$NC"
+}
+
 readonly FORMULA_PACKAGES=(
     "mas:Mac App Store CLI"
     "node:Node.js"
     "yarn:Yarn"
     "git-flow:Git Flow"
+    "gh:GitHub CLI"
 )
 
 readonly CASK_PACKAGES=(
@@ -65,23 +73,6 @@ add_to_shell_config() {
     local line="$1"
     /bin/echo "$line" >> "$HOME/.bashrc"
     [ -f "$HOME/.zshrc" ] && /bin/echo "$line" >> "$HOME/.zshrc"
-}
-
-show_help() {
-    cat << EOF
-Development Environment Setup Script v$SCRIPT_VERSION
-
-USAGE:
-    $0 [options]
-
-OPTIONS:
-    help                    Show this help message
-    upgrade    Upgrade existing packages
-
-EXAMPLES:
-    $0                     Fresh installation
-    $0 upgrade Upgrade existing packages
-EOF
 }
 
 install_homebrew() {
@@ -233,6 +224,9 @@ install_xcode() {
     [ "$OS_TYPE" != "macos" ] && return
     progress "Installing Xcode for Expo development"
     
+    # Ensure system paths are available (Homebrew shellenv can corrupt PATH)
+    export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+    
     if [ ! -d "/Library/Developer/CommandLineTools" ]; then
         info "Installing Command Line Tools via Software Update"
         /usr/bin/touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
@@ -253,64 +247,55 @@ install_xcode() {
         mas install 497799835 || warn "Failed to install Xcode - install manually from App Store"
     fi
 
-    if [ -d "/Applications/Xcode.app" ] && command -v xcodebuild >/dev/null 2>&1; then
-        if ! /usr/bin/xcodebuild -license check >/dev/null 2>&1; then
-            info "Accepting Xcode license"
-            /usr/bin/sudo /usr/bin/xcodebuild -license accept
+    if [ -d "/Applications/Xcode.app" ]; then
+        local current_dir expected_dir xcode_version
+        current_dir=$(/usr/bin/xcode-select -p 2>/dev/null || echo "")
+        expected_dir="/Applications/Xcode.app/Contents/Developer"
+        
+        # Handle sudo requirements upfront if needed
+        local needs_sudo=false
+        [ "$current_dir" != "$expected_dir" ] && needs_sudo=true
+        ! /usr/bin/xcodebuild -license check >/dev/null 2>&1 && needs_sudo=true
+        
+        if [ "$needs_sudo" = true ] && ! /usr/bin/sudo -n true 2>/dev/null; then
+            info "Xcode configuration requires admin access - please enter your password:"
+            /usr/bin/sudo -v
         fi
-        success "Xcode ready"
-    else
-        success "Using Command Line Tools only"
-    fi
-}
-
-verify_installations() {
-    local tools=(
-        "brew:Homebrew" "zsh:Zsh" "node:Node.js" "yarn:Yarn" "git-flow:Git Flow" "expo:Expo CLI"
-    )
-
-    info "Verification Summary:"
-    for tool in "${tools[@]}"; do
-        local cmd="${tool%:*}" name="${tool#*:}"
-        if command -v "$cmd" >/dev/null; then
-            local version=""
-            case "$cmd" in
-                "brew") version=" $(brew --version | /usr/bin/head -1)" ;;
-                "node"|"yarn") version=" $(${cmd} --version 2>/dev/null)" ;;
-            esac
-            success "  $name$version"
-        else
-            warn "  $name not found"
-        fi
-    done
-
-    if [ "$OS_TYPE" = "macos" ]; then
-        local apps=("Google Chrome" "Android Studio" "Claude" "IntelliJ IDEA" "Rectangle" "iTerm")
-        for app in "${apps[@]}"; do
-            if /bin/ls "/Applications/$app"* >/dev/null 2>&1; then
-                success "  $app"
+        
+        # Set developer directory if needed
+        if [ "$current_dir" != "$expected_dir" ]; then
+            info "Setting Xcode as active developer directory"
+            if /usr/bin/sudo /usr/bin/xcode-select --switch "$expected_dir" 2>&1; then
+                success "Developer directory set to Xcode"
             else
-                warn "  $app not found"
+                warn "Failed to set developer directory"
             fi
-        done
+        fi
+        
+        # Test xcodebuild and accept license if needed
+        if /usr/bin/xcodebuild -version >/dev/null 2>&1; then
+            if ! /usr/bin/xcodebuild -license check >/dev/null 2>&1; then
+                info "Accepting Xcode license"
+                if /usr/bin/sudo /usr/bin/xcodebuild -license accept 2>&1; then
+                    success "Xcode license accepted"
+                else
+                    warn "Failed to accept Xcode license"
+                fi
+            fi
+            
+            xcode_version=$(/usr/bin/xcodebuild -version 2>/dev/null | /usr/bin/head -1)
+            success "Xcode ready (${xcode_version})"
+        else
+            warn "Xcode installed but xcodebuild not working. Launch Xcode once to complete setup."
+        fi
+    elif /usr/bin/xcodebuild -version >/dev/null 2>&1; then
+        success "Using Command Line Tools only"
+    else
+        warn "Neither Xcode nor Command Line Tools found"
     fi
-
-    info "Script Info:"
-    success "  Version: $SCRIPT_VERSION"
-    success "  Source: https://github.com/yourusername/dev-setup"
 }
 
 main() {
-    case "${1:-}" in
-        "help"|"-h"|"--help")
-            show_help
-            exit 0
-            ;;
-        "upgrade")
-            UPGRADE_MODE=true
-            info "Upgrade mode enabled"
-            ;;
-    esac
 
     msg "Development Environment Setup v$SCRIPT_VERSION" "$CYAN"
     info "This script runs non-interactively. Some operations may require manual follow-up."
@@ -340,8 +325,6 @@ main() {
     msg "Setup Complete!" "$GREEN"
     printf '%sTotal time: %dm %ds%s\n' "$GREEN" $((elapsed/60)) $((elapsed%60)) "$NC"
 
-    verify_installations
-    
     info "Possible Next steps:"
         info "1. Set zsh as default shell: chsh -s $(command -v zsh)"
         info "2. Restart terminal for shell changes to take effect"

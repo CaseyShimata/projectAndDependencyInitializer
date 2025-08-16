@@ -15,10 +15,3 @@ error() { msg "$1" "$RED"; exit 1; }
 success() { msg "$1"; }
 warn() { msg "$1" "$YELLOW"; }
 info() { msg "$1" "$CYAN"; }
-
-# Progress function for deploy.sh
-progress() {
-    CURRENT_STEP=$((CURRENT_STEP + 1))
-    local elapsed=$(( $(/bin/date +%s 2>/dev/null || echo 0) - START_TIME ))
-    printf '%s[%d/%d] [%02d:%02d] %s%s\n' "$BLUE" "$CURRENT_STEP" "$TOTAL_STEPS" $((elapsed/60)) $((elapsed%60)) "$1" "$NC"
-}
