@@ -1,221 +1,547 @@
-#!/bin/sh
+#!/bin/bash
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+set -eE
 
-set -e
-
+readonly SCRIPT_VERSION="1.0.0"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/.functions.sh"
 
-# Functions specific to this script
-ensure_zsh() {
-    if [ -z "$ZSH_VERSION" ]; then
-        info "Switching to zsh for better compatibility"
-        exec /bin/zsh "$0" "$@"
+readonly RED=$'\033[0;31m'
+readonly GREEN=$'\033[0;32m'
+readonly YELLOW=$'\033[1;33m'
+readonly BLUE=$'\033[0;34m'
+readonly CYAN=$'\033[0;36m'
+readonly NC=$'\033[0m'
+
+msg() { printf '%s%s%s\n' "${2:-$GREEN}" "$1" "$NC"; }
+error() { msg "ERROR: $1" "$RED"; exit 1; }
+success() { msg "$1"; }
+warn() { msg "$1" "$YELLOW"; }
+info() { msg "$1" "$CYAN"; }
+
+trap 'error "Command failed at line $LINENO: $BASH_COMMAND"' ERR
+
+readonly FORMULA_PACKAGES=(
+    "mas:Mac App Store CLI"
+    "node:Node.js"
+    "yarn:Yarn"
+    "git-flow:Git Flow"
+    "gh:GitHub CLI"
+    "git-crypt:Git Crypt"
+    "tmux:Terminal Multiplexer"
+)
+
+readonly CASK_PACKAGES=(
+    "google-chrome:Google Chrome"
+    "android-studio:Android Studio"
+    "claude:Claude Desktop App"
+    "claude-code:Claude Code CLI"
+    "intellij-idea:IntelliJ IDEA Ultimate"
+    "rectangle:Rectangle"
+    "iterm2:iTerm2"
+    "gpg-suite:GPG Suite"
+)
+
+readonly NPM_PACKAGES=(
+    "expo-cli:expo:Expo CLI"
+)
+
+CURRENT_STEP=0
+START_TIME=$(/bin/date +%s 2>/dev/null || echo 0)
+TOTAL_STEPS=$((4 + ${#CASK_PACKAGES[@]} + ${#FORMULA_PACKAGES[@]} + ${#NPM_PACKAGES[@]}))
+UPGRADE_MODE="${1:-1}"
+PROJECT_SELECTION="${2:-}"
+OS_TYPE=""
+ARCH=""
+
+progress() {
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    local elapsed=$(( $(/bin/date +%s 2>/dev/null || echo 0) - START_TIME ))
+    printf '%s[%d/%d] [%02d:%02d] %s%s\n' "$BLUE" "$CURRENT_STEP" "$TOTAL_STEPS" $((elapsed/60)) $((elapsed%60)) "$1" "$NC"
+}
+
+detect_os() {
+    case "$(uname)" in
+        "Darwin") echo "macos" ;;
+        "Linux") echo "linux" ;;
+        *) error "Unsupported OS: $(uname)" ;;
+    esac
+}
+
+check_root() {
+    if [ "${EUID:-$(id -u)}" = "0" ]; then
+        error "DO NOT run with sudo! Run as regular user."
     fi
+}
+
+add_to_shell_config() {
+    local line="$1"
+    echo "$line" >> "$HOME/.bashrc" 2>/dev/null || true
+    [ -f "$HOME/.zshrc" ] && echo "$line" >> "$HOME/.zshrc" 2>/dev/null || true
+}
+
+decrypt_env_if_needed() {
+    info "Checking for encrypted .env file"
+    
+    if [ -f "$SCRIPT_DIR/.env" ] && file "$SCRIPT_DIR/.env" | grep -q "ASCII text"; then
+        success ".env file already decrypted"
+        return 0
+    fi
+    
+    if command -v git-crypt >/dev/null 2>&1; then
+        info "Attempting to unlock git-crypt protected files"
+        cd "$SCRIPT_DIR"
+        if git-crypt unlock 2>/dev/null; then
+            success "Repository unlocked with git-crypt"
+        else
+            warn "Could not unlock repository - ensure you have GPG key configured"
+        fi
+        cd - >/dev/null
+    fi
+    
+    if [ ! -f "$SCRIPT_DIR/.env" ]; then
+        error ".env file not found - ensure repository is properly decrypted"
+    fi
+}
+
+install_homebrew() {
+    progress "Setting up Homebrew package manager"
+
+    local brew_found=""
+    for path in "/opt/homebrew/bin/brew" "/usr/local/bin/brew" "/home/linuxbrew/.linuxbrew/bin/brew"; do
+        if [ -x "$path" ]; then
+            brew_found="$path"
+            break
+        fi
+    done
+
+    if [ -n "$brew_found" ]; then
+        success "Homebrew found at $brew_found"
+        eval "$("$brew_found" shellenv)" || error "Failed to setup Homebrew environment"
+        return 0
+    fi
+
+    info "Installing Homebrew - this will download and install the package manager"
+    if ! NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
+        error "Failed to install Homebrew"
+    fi
+
+    local brew_path
+    case "$OS_TYPE" in
+        "macos") 
+            if [ "$ARCH" = "arm64" ]; then
+                brew_path="/opt/homebrew/bin/brew"
+            else
+                brew_path="/usr/local/bin/brew"
+            fi
+            ;;
+        *) brew_path="/home/linuxbrew/.linuxbrew/bin/brew" ;;
+    esac
+
+    if [ ! -x "$brew_path" ]; then
+        error "Homebrew installation failed - brew not found at $brew_path"
+    fi
+
+    add_to_shell_config "eval \"\$($brew_path shellenv)\""
+    eval "$("$brew_path" shellenv)" || error "Failed to setup Homebrew environment"
+    success "Homebrew installed and configured"
+}
+
+install_zsh_via_brew() {
+    progress "Ensuring zsh shell is available"
+
+    if ! command -v zsh >/dev/null 2>&1; then
+        info "Installing zsh shell"
+        if ! brew install zsh; then
+            error "Failed to install zsh"
+        fi
+    else
+        success "zsh shell is available"
+    fi
+
+    if [ -z "$ZSH_VERSION" ]; then
+        info "Switching to zsh for enhanced shell features"
+        exec env PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PATH" /bin/zsh "$0" "$@"
+    fi
+
+    success "Running in zsh environment"
+}
+
+install_oh_my_zsh() {
+    progress "Setting up Oh-My-Zsh framework"
+
+    if [ ! -d "$HOME/.oh-my-zsh" ]; then
+        info "Installing Oh-My-Zsh for better shell experience"
+        if ! RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.github.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" 2>/dev/null; then
+            warn "Oh-My-Zsh installation had issues but continuing"
+        fi
+    else
+        success "Oh-My-Zsh framework already installed"
+    fi
+
+    local zshrc="$HOME/.zshrc"
+    if [ -f "$zshrc" ]; then
+        info "Configuring zsh theme and plugins"
+        sed -i.bak 's/ZSH_THEME="robbyrussell"/ZSH_THEME="agnoster"/' "$zshrc" 2>/dev/null || true
+        
+        local plugins="plugins=(git brew node npm yarn"
+        [ "$OS_TYPE" = "macos" ] && plugins="$plugins macos"
+        plugins="$plugins)"
+        sed -i.bak "s/plugins=(git)/$plugins/" "$zshrc" 2>/dev/null || true
+    fi
+    
+    success "Shell environment configured"
+}
+
+install_packages() {
+    info "Installing required development tools"
+    
+    if [ "$UPGRADE_MODE" = "2" ]; then
+        info "Updating Homebrew package definitions"
+        brew update --quiet || warn "Could not update Homebrew"
+    fi
+
+    for package in "${FORMULA_PACKAGES[@]}"; do
+        local name="${package%:*}" 
+        local display="${package#*:}"
+        progress "Checking $display"
+        if brew list "$name" >/dev/null 2>&1; then
+            if [ "$UPGRADE_MODE" = "2" ]; then
+                info "Upgrading $display to latest version"
+                brew upgrade "$name" --quiet 2>/dev/null || true
+            else
+                success "$display is installed"
+            fi
+        else
+            info "Installing $display"
+            if brew install "$name" --quiet; then
+                success "$display installed successfully"
+            else
+                warn "Failed to install $display - may need manual installation"
+            fi
+        fi
+    done
+
+    if [ "$OS_TYPE" = "macos" ]; then
+        info "Installing macOS desktop applications"
+        for package in "${CASK_PACKAGES[@]}"; do
+            local name="${package%:*}"
+            local display="${package#*:}"
+            progress "Checking $display"
+            if brew list --cask "$name" >/dev/null 2>&1; then
+                if [ "$UPGRADE_MODE" = "2" ]; then
+                    info "Upgrading $display application"
+                    brew upgrade --cask "$name" --quiet 2>/dev/null || true
+                else
+                    success "$display is installed"
+                fi
+            else
+                info "Installing $display application"
+                if brew install --cask "$name" --quiet; then
+                    success "$display installed successfully"
+                else
+                    warn "Failed to install $display - may need manual installation"
+                fi
+            fi
+        done
+    fi
+
+    info "Configuring Yarn global package directory"
+    yarn config set prefix "$HOME/.yarn-global" 2>/dev/null || warn "Could not set yarn prefix"
+    add_to_shell_config "export PATH=\"\$HOME/.yarn-global/bin:\$PATH\""
+    export PATH="$HOME/.yarn-global/bin:$PATH"
+
+    for package in "${NPM_PACKAGES[@]}"; do
+        local name="${package%%:*}"
+        local cmd="${package#*:}"
+        cmd="${cmd%:*}"
+        local display="${package##*:}"
+        progress "Checking $display"
+        
+        if command -v "$cmd" >/dev/null 2>&1; then
+            if [ "$UPGRADE_MODE" = "2" ]; then
+                info "Upgrading $display to latest version"
+                yarn global upgrade "$name" 2>/dev/null || true
+            else
+                success "$display is installed"
+            fi
+        else
+            info "Installing $display globally"
+            if yarn global add "$name"; then
+                success "$display installed successfully"
+            else
+                warn "Failed to install $display - may need manual installation"
+            fi
+        fi
+    done
+}
+
+install_xcode() {
+    [ "$OS_TYPE" != "macos" ] && return
+    progress "Setting up Xcode for iOS development"
+    
+    if [ ! -d "/Library/Developer/CommandLineTools" ]; then
+        info "Installing Xcode Command Line Tools for compilation support"
+        touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+        PROD=$(softwareupdate -l | grep "\*.*Command Line" | tail -n 1 | sed 's/^[^C]* //')
+        if [ -n "$PROD" ]; then
+            softwareupdate -i "$PROD" --verbose || warn "Failed to install Command Line Tools"
+        fi
+        rm -f /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
+    else
+        success "Xcode Command Line Tools already installed"
+    fi
+    
+    if [ ! -d "/Applications/Xcode.app" ]; then
+        info "Installing Xcode from App Store (this is a large download)"
+        mas install 497799835 || warn "Failed to install Xcode - install manually from App Store"
+    else
+        success "Xcode application found"
+    fi
+
+    if [ -d "/Applications/Xcode.app" ]; then
+        info "Configuring Xcode developer tools (admin password required)"
+        sudo xcode-select --switch "/Applications/Xcode.app/Contents/Developer" 2>/dev/null || warn "Could not set Xcode path"
+        sudo xcodebuild -license accept 2>/dev/null || warn "Could not accept Xcode license"
+        success "Xcode development tools configured"
+    fi
+}
+
+setup_development_environment() {
+    msg "Expo Development Environment Setup v$SCRIPT_VERSION" "$CYAN"
+
+    OS_TYPE=$(detect_os)
+    ARCH=$(uname -m)
+    info "Detected system: $OS_TYPE ($ARCH architecture)"
+    
+    check_root
+    decrypt_env_if_needed
+
+    install_homebrew
+    install_zsh_via_brew "$@"
+    install_oh_my_zsh
+    install_packages
+    install_xcode
+
+    local elapsed=$(( $(/bin/date +%s 2>/dev/null || echo 0) - START_TIME ))
+    msg "Environment setup complete! Time elapsed: $((elapsed/60))m $((elapsed%60))s" "$GREEN"
 }
 
 load_config() {
     local env_file="$1"
-    source "$env_file" 2>/dev/null || error "Configuration file $env_file not found"
+    
+    if [ ! -f "$env_file" ]; then
+        error "Configuration file $env_file not found - ensure git-crypt is unlocked"
+    fi
+    
+    info "Loading project configuration from .env file"
+    
+    if ! source "$env_file" 2>/dev/null; then
+        error "Failed to parse .env configuration file"
+    fi
+    
+    if [ -z "${PROJECTS:-}" ] || [ ${#PROJECTS[@]} -eq 0 ]; then
+        error "No projects defined in .env file - check PROJECTS array"
+    fi
+    
+    success "Successfully loaded ${#PROJECTS[@]} project(s) from configuration"
 }
 
 show_project_menu() {
-    clear
-    echo "${CYAN}================================${NC}"
-    echo "${CYAN}     Expo Project Launcher      ${NC}"
-    echo "${CYAN}================================${NC}"
+    msg "Available Expo Projects:" "$CYAN"
     echo ""
-
+    
     local i=1
     for project in "${PROJECTS[@]}"; do
         IFS='|' read -r name repo <<< "$project"
-        if [ -n "$repo" ]; then
-            echo "  ${GREEN}$i)${NC} $name ${YELLOW}[from repository]${NC}"
-        else
-            echo "  ${GREEN}$i)${NC} $name ${CYAN}[create new]${NC}"
-        fi
+        printf "  %s[%d]%s %s\n" "$YELLOW" "$i" "$NC" "$name"
         ((i++))
     done
-
     echo ""
-    echo -n "${CYAN}Select project (1-${#PROJECTS[@]}): ${NC}"
-    read -r selection
+}
+
+get_project_selection() {
+    local selection="$1"
     
-    if [ "$selection" -lt 1 ] || [ "$selection" -gt "${#PROJECTS[@]}" ]; then
-        error "Invalid selection"
+    if [ -z "$selection" ]; then
+        show_project_menu
+        printf "%sEnter project number: %s" "$CYAN" "$NC"
+        read -r selection
+    fi
+    
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "${#PROJECTS[@]}" ]; then
+        error "Invalid project selection: $selection"
     fi
     
     echo "$selection"
 }
 
-check_git_deps() {
-    command -v git >/dev/null 2>&1 || error "Git is not installed"
-    command -v gh >/dev/null 2>&1 || error "GitHub CLI (gh) is not installed"
-    command -v git-flow >/dev/null 2>&1 || error "git-flow is not installed"
-}
-
-check_repo_exists() {
-    local repo_url="$1"
-    git ls-remote "$repo_url" >/dev/null 2>&1
-}
-
-create_remote_repo() {
-    local repo_name="$1"
-    local github_username="$2"
-    local description="${3:-Auto-created repository}"
+authenticate_github() {
+    if [ -n "${GITHUB_TOKEN:-}" ] && [ "$GITHUB_TOKEN" != "ghp_your_personal_access_token_here" ]; then
+        info "Authenticating with GitHub using provided token"
+        echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null || true
+    fi
     
-    if gh repo view "$github_username/$repo_name" >/dev/null 2>&1; then
-        success "Remote repository already exists"
+    if gh auth status >/dev/null 2>&1; then
+        success "GitHub authentication verified"
         return 0
     else
-        info "Creating remote repository: $repo_name"
-        if gh repo create "$repo_name" --public --description "$description" --clone=false; then
-            success "Remote repository created successfully"
-        else
-            error "Failed to create remote repository"
-        fi
+        warn "GitHub not authenticated - repository will be local only"
+        return 1
     fi
-}
-
-setup_git_flow() {
-    local development_branch="${1:-development}"
-    local production_branch="${2:-production}"
-    local repo_name="$3"
-    local github_username="$4"
-    
-    if [ ! -d ".git" ]; then
-        info "Initializing git repository"
-        git init
-    fi
-    
-    if ! git remote get-url origin >/dev/null 2>&1; then
-        info "Adding remote origin"
-        git remote add origin "https://github.com/$github_username/$repo_name.git"
-    fi
-    
-    if ! git config --get gitflow.branch.master >/dev/null 2>&1; then
-        info "Initializing git flow with $development_branch and $production_branch branches"
-        
-        git flow init -d \
-            --force \
-            --prefix="feature/" \
-            --release-prefix="release/" \
-            --hotfix-prefix="hotfix/" \
-            --support-prefix="support/" \
-            --versiontag-prefix="v"
-        
-        git config gitflow.branch.master "$production_branch"
-        git config gitflow.branch.develop "$development_branch"
-        
-        success "Git flow initialized"
-    fi
-    
-    git checkout -B "$development_branch"
-    
-    if ! git rev-parse HEAD >/dev/null 2>&1; then
-        echo "# $repo_name" > README.md
-        git add README.md
-        git commit -m "Initial commit"
-    fi
-    
-    info "Pushing $development_branch branch"
-    git push -u origin "$development_branch"
-    
-    if ! git ls-remote --heads origin "$production_branch" | grep -q "$production_branch"; then
-        info "Creating and pushing $production_branch branch"
-        git checkout -B "$production_branch"
-        git push -u origin "$production_branch"
-        git checkout "$development_branch"
-    fi
-    
-    success "Repository setup complete with $development_branch and $production_branch branches"
 }
 
 setup_git_repository() {
     local project_name="$1"
     local repo_url="$2"
-    local github_username="${GITHUB_USERNAME:-$(gh api user --jq .login 2>/dev/null)}"
+    local github_username="${GITHUB_USERNAME:-$(gh api user --jq .login 2>/dev/null || echo "")}"
     local development_branch="${GIT_DEVELOPMENT_BRANCH:-development}"
     local production_branch="${GIT_PRODUCTION_BRANCH:-production}"
     
-    if [ -z "$github_username" ]; then
-        warn "Could not determine GitHub username. Please set GITHUB_USERNAME in .env or authenticate with 'gh auth login'"
-        return 1
-    fi
+    info "Initializing git repository for $project_name"
     
     local repo_name
     repo_name=$(basename "$repo_url" .git)
     
-    check_git_deps
-    create_remote_repo "$repo_name" "$github_username" "Expo project: $project_name"
-    setup_git_flow "$development_branch" "$production_branch" "$repo_name" "$github_username"
+    if [ ! -d ".git" ]; then
+        git init || error "Failed to initialize git repository"
+    fi
+    
+    if ! git rev-parse HEAD >/dev/null 2>&1; then
+        info "Creating initial commit"
+        echo "# $repo_name" > README.md
+        git add README.md
+        git commit -m "Initial commit"
+    fi
+    
+    git checkout -B "$development_branch"
+    
+    if authenticate_github && [ -n "$github_username" ]; then
+        info "Configuring GitHub remote repository"
+        
+        if ! gh repo view "$github_username/$repo_name" >/dev/null 2>&1; then
+            info "Creating new GitHub repository: $repo_name"
+            gh repo create "$repo_name" --public --description "Expo project: $project_name" --clone=false || warn "Could not create remote repo"
+        fi
+        
+        git remote add origin "https://github.com/$github_username/$repo_name.git" 2>/dev/null || true
+        
+        info "Pushing to GitHub development branch"
+        git push -u origin "$development_branch" 2>/dev/null || warn "Could not push to remote"
+        
+        info "Creating production branch"
+        git checkout -B "$production_branch"
+        git push -u origin "$production_branch" 2>/dev/null || warn "Could not push production branch"
+        git checkout "$development_branch"
+        
+        success "Git repository configured with remote on GitHub"
+    else
+        success "Local git repository initialized"
+    fi
 }
 
 create_expo_project() {
     local project_name="$1"
     local repo_url="$2"
     
-    info "Creating new Expo project: $project_name"
-    npx create-expo-app "$project_name" --template blank
+    info "Creating new Expo React Native project: $project_name"
     
-    cd "$project_name"
+    export npm_config_yes=true
+    export CI=true
+    export EXPO_NO_TELEMETRY=1
+    
+    if ! yarn create expo-app "$project_name" --template blank; then
+        error "Failed to create Expo project"
+    fi
+    
+    cd "$project_name" || error "Failed to enter project directory"
     setup_git_repository "$project_name" "$repo_url"
-    cd ..
+    cd .. || error "Failed to return to parent directory"
     
-    success "Expo project $project_name created and configured"
-}
-
-clone_existing_project() {
-    local project_name="$1"
-    local repo_url="$2"
-    
-    info "Cloning existing project from $repo_url"
-    git clone "$repo_url" "$project_name"
-    success "Project $project_name cloned successfully"
+    success "Expo project created and initialized"
 }
 
 setup_project() {
     local project_name="$1"
     local repo_url="$2"
     
-    export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.npm-global/bin:$PATH"
+    local sub_projects_dir="$SCRIPT_DIR/subProjects"
+    if [ ! -d "$sub_projects_dir" ]; then
+        info "Creating subProjects directory for project storage"
+        mkdir -p "$sub_projects_dir" || error "Failed to create subProjects directory"
+    fi
+    
+    cd "$sub_projects_dir" || error "Failed to enter subProjects directory"
     
     if [ -d "$project_name" ]; then
-        success "Project directory already exists"
+        success "Project $project_name already exists locally"
         return 0
     fi
     
-    if check_repo_exists "$repo_url"; then
-        clone_existing_project "$project_name" "$repo_url"
+    if git ls-remote "$repo_url" >/dev/null 2>&1; then
+        info "Repository exists - cloning from $repo_url"
+        git clone "$repo_url" "$project_name" || error "Failed to clone repository"
+        success "Project cloned successfully"
     else
-        info "Repository doesn't exist, creating new project with repository"
+        info "Repository not found - creating new project"
         create_expo_project "$project_name" "$repo_url"
     fi
 }
 
 install_and_start() {
     local project_name="$1"
+    local project_path="$SCRIPT_DIR/subProjects/$project_name"
     
-    cd "$project_name"
-    
-    if [ ! -d "node_modules" ]; then
-        info "Installing project dependencies"
-        npm install
-        success "Dependencies installed"
+    if [ ! -d "$project_path" ]; then
+        error "Project directory not found: $project_path"
     fi
     
-    info "Starting Expo development server (i=iOS, a=Android, w=Web)"
-    npx expo start
+    cd "$project_path" || error "Failed to enter project directory"
+    
+    if [ ! -d "node_modules" ]; then
+        info "Installing project dependencies with Yarn"
+        yarn install || error "Failed to install dependencies"
+        success "All dependencies installed"
+    else
+        info "Dependencies already installed"
+    fi
+
+    local session_name="expo-$project_name"
+    tmux kill-session -t "$session_name" 2>/dev/null || true
+    info "Creating new tmux session: $session_name"
+    tmux new-session -d -s "$session_name" -c "$project_path"
+    tmux send-keys -t "$session_name" "npx expo start" C-m
+    success "Expo server started in tmux session"
+
 }
 
-# Main script execution
-/bin/sh "$SCRIPT_DIR/deploy.sh" || error "Environment setup failed"
-ensure_zsh "$@"
+info "Initializing Expo project launcher..."
+setup_development_environment "$@"
+
+if [ -z "$ZSH_VERSION" ]; then
+    info "Restarting in zsh shell..."
+    exec /bin/zsh "$0" "$@"
+fi
+
 load_config "$SCRIPT_DIR/.env"
 
-selection=$(show_project_menu)
-IFS='|' read -r PROJECT_NAME REPO_URL <<< "${PROJECTS[$selection]}"
+selection=$(get_project_selection "$PROJECT_SELECTION")
 
-info "Selected: $PROJECT_NAME"
+counter=1
+PROJECT_NAME=""
+REPO_URL=""
+for project in "${PROJECTS[@]}"; do
+    if [ "$counter" -eq "$selection" ]; then
+        IFS='|' read -r PROJECT_NAME REPO_URL <<< "$project"
+        break
+    fi
+    ((counter++))
+done
+
+if [ -z "$PROJECT_NAME" ]; then
+    error "Failed to parse project configuration"
+fi
+
+msg "Selected project: $PROJECT_NAME" "$GREEN"
 
 setup_project "$PROJECT_NAME" "$REPO_URL"
 install_and_start "$PROJECT_NAME"

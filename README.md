@@ -1,1 +1,1 @@
-# expoDependencyInstallAndProjectBoilerPlate
+# projectAndDependencyInitializer
