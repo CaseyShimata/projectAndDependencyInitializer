@@ -1,25 +1,17 @@
 #!/bin/bash
-export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 set -eE
+trap 'error "Command failed at line $LINENO: $BASH_COMMAND"' ERR
+
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 
 readonly SCRIPT_VERSION="1.0.0"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
+readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 readonly RED=$'\033[0;31m'
 readonly GREEN=$'\033[0;32m'
 readonly YELLOW=$'\033[1;33m'
 readonly BLUE=$'\033[0;34m'
 readonly CYAN=$'\033[0;36m'
 readonly NC=$'\033[0m'
-
-msg() { printf '%s%s%s\n' "${2:-$GREEN}" "$1" "$NC"; }
-error() { msg "ERROR: $1" "$RED"; exit 1; }
-success() { msg "$1"; }
-warn() { msg "$1" "$YELLOW"; }
-info() { msg "$1" "$CYAN"; }
-
-trap 'error "Command failed at line $LINENO: $BASH_COMMAND"' ERR
-
 readonly FORMULA_PACKAGES=(
     "mas:Mac App Store CLI"
     "node:Node.js"
@@ -46,19 +38,20 @@ readonly NPM_PACKAGES=(
     "expo-cli:expo:Expo CLI"
 )
 
-CURRENT_STEP=0
-START_TIME=$(/bin/date +%s 2>/dev/null || echo 0)
-TOTAL_STEPS=$((4 + ${#CASK_PACKAGES[@]} + ${#FORMULA_PACKAGES[@]} + ${#NPM_PACKAGES[@]}))
-UPGRADE_MODE="${1:-1}"
-PROJECT_SELECTION="${2:-}"
 OS_TYPE=""
 ARCH=""
 
-progress() {
-    CURRENT_STEP=$((CURRENT_STEP + 1))
-    local elapsed=$(( $(/bin/date +%s 2>/dev/null || echo 0) - START_TIME ))
-    printf '%s[%d/%d] [%02d:%02d] %s%s\n' "$BLUE" "$CURRENT_STEP" "$TOTAL_STEPS" $((elapsed/60)) $((elapsed%60)) "$1" "$NC"
-}
+# Initialize script argument variables
+UPGRADE_MODE=""
+PROJECT_NUMBER=""
+PROJECT_NAME=""
+REPO_URL=""
+
+msg() { printf '%s%s%s\n' "${2:-$GREEN}" "$1" "$NC"; }
+error() { msg "ERROR: $1" "$RED"; exit 1; }
+success() { msg "$1"; }
+warn() { msg "$1" "$YELLOW"; }
+info() { msg "$1" "$CYAN"; }
 
 detect_os() {
     case "$(uname)" in
@@ -83,7 +76,7 @@ add_to_shell_config() {
 decrypt_env_if_needed() {
     info "Checking for encrypted .env file"
     
-    if [ -f "$SCRIPT_DIR/.env" ] && file "$SCRIPT_DIR/.env" | /usr/bin/grep -q "ASCII text"; then
+    if [ -f "$SCRIPT_DIR/.env" ] && /usr/bin/file "$SCRIPT_DIR/.env" | /usr/bin/grep -q "ASCII text"; then
         success ".env file already decrypted"
         return 0
     fi
@@ -111,7 +104,7 @@ decrypt_env_if_needed() {
 }
 
 install_homebrew() {
-    progress "Setting up Homebrew package manager"
+    info "Setting up Homebrew package manager"
 
     local brew_found=""
     for path in "/opt/homebrew/bin/brew" "/usr/local/bin/brew" "/home/linuxbrew/.linuxbrew/bin/brew"; do
@@ -153,8 +146,8 @@ install_homebrew() {
     success "Homebrew installed and configured"
 }
 
-install_zsh_via_brew() {
-    progress "Ensuring zsh shell is available"
+install_zsh_via_brew_and_switch_to_zsh() {
+    info "Ensuring zsh shell is available"
 
     if ! command -v zsh >/dev/null 2>&1; then
         info "Installing zsh shell"
@@ -174,7 +167,7 @@ install_zsh_via_brew() {
 }
 
 install_oh_my_zsh() {
-    progress "Setting up Oh-My-Zsh framework"
+    info "Setting up Oh-My-Zsh framework"
 
     if [ ! -d "$HOME/.oh-my-zsh" ]; then
         info "Installing Oh-My-Zsh for better shell experience"
@@ -199,6 +192,88 @@ install_oh_my_zsh() {
     success "Shell environment configured"
 }
 
+configure_git_credentials() {
+    info "Configure git user if not already set"
+    if [ -z "$(git config --global user.name)" ]; then
+        local git_user="${GIT_USER_NAME:-$USER}"
+        info "Setting git user name to: $git_user"
+        git config --global user.name "$git_user"
+    fi
+
+    if [ -z "$(git config --global user.email)" ]; then
+        local git_email="${GIT_USER_EMAIL:-$USER@$(hostname)}"
+        info "Setting git user email to: $git_email"
+        git config --global user.email "$git_email"
+    fi
+
+    # Configure credential helper to avoid keychain prompts
+    git config --global credential.helper 'cache --timeout=3600'
+}
+
+get_or_read_script_arguments() {
+    # ALL or NONE approach: provide all required arguments or none for interactive mode
+    # To extend: 1) Update REQUIRED_ARGS_COUNT 2) Handle new arg 3) Add prompt
+    
+    local REQUIRED_ARGS_COUNT=2
+    
+    if [ $# -gt 0 ] && [ $# -ne $REQUIRED_ARGS_COUNT ]; then
+        error "Invalid number of arguments."
+    fi
+    
+    if [ $# -eq $REQUIRED_ARGS_COUNT ]; then
+        UPGRADE_MODE="$1"
+        PROJECT_NUMBER="$2"
+    fi
+    
+    if [ -z "$UPGRADE_MODE" ]; then
+        info "Select dependency upgrade mode:"
+        echo "  ${YELLOW}[1]${NC} Standard mode - Check installed packages only"
+        echo "  ${YELLOW}[2]${NC} Upgrade mode - Update all packages to latest versions"
+        echo ""
+        printf "${CYAN}Enter upgrade mode (1-2): ${NC}"
+        read -r UPGRADE_MODE
+    fi
+    
+    if ! [[ "$UPGRADE_MODE" =~ ^[1-2]$ ]]; then
+        error "Invalid upgrade mode: $UPGRADE_MODE (must be 1 or 2)"
+    fi
+
+    if [ -z "$PROJECT_NUMBER" ]; then
+        info "Available Expo Projects:"
+        echo ""
+        
+        local i=1
+        for project in "${PROJECTS[@]}"; do
+            IFS='|' read -r name repo <<< "$project"
+            printf "  ${YELLOW}[%d]${NC} %s\n" "$i" "$name"
+            ((i++))
+        done
+        echo ""
+        printf "${CYAN}Enter project number (1-${#PROJECTS[@]}): ${NC}"
+        read -r PROJECT_NUMBER
+    fi
+    
+    local counter=1
+    PROJECT_NAME=""
+    REPO_URL=""
+    for project in "${PROJECTS[@]}"; do
+        if [ "$counter" -eq "$PROJECT_NUMBER" ]; then
+            IFS='|' read -r PROJECT_NAME REPO_URL <<< "$project"
+            break
+        fi
+        ((counter++))
+    done
+    
+    if [ -z "$PROJECT_NAME" ]; then
+        error "Invalid project number: $PROJECT_NUMBER (must be between 1 and ${#PROJECTS[@]})"
+    fi
+    
+    msg "Configuration:" "$CYAN"
+    msg "Upgrade Mode: $UPGRADE_MODE" "$GREEN"
+    msg "Selected Project: $PROJECT_NAME" "$GREEN"
+    echo ""
+}
+
 install_packages() {
     info "Installing required development tools"
     
@@ -210,7 +285,7 @@ install_packages() {
     for package in "${FORMULA_PACKAGES[@]}"; do
         local name="${package%:*}" 
         local display="${package#*:}"
-        progress "Checking $display"
+        info "Checking $display"
         if brew list "$name" >/dev/null 2>&1; then
             if [ "$UPGRADE_MODE" = "2" ]; then
                 info "Upgrading $display to latest version"
@@ -233,7 +308,7 @@ install_packages() {
         for package in "${CASK_PACKAGES[@]}"; do
             local name="${package%:*}"
             local display="${package#*:}"
-            progress "Checking $display"
+            info "Checking $display"
             if brew list --cask "$name" >/dev/null 2>&1; then
                 if [ "$UPGRADE_MODE" = "2" ]; then
                     info "Upgrading $display application"
@@ -262,7 +337,7 @@ install_packages() {
         local cmd="${package#*:}"
         cmd="${cmd%:*}"
         local display="${package##*:}"
-        progress "Checking $display"
+        info "Checking $display"
         
         if command -v "$cmd" >/dev/null 2>&1; then
             if [ "$UPGRADE_MODE" = "2" ]; then
@@ -284,7 +359,7 @@ install_packages() {
 
 install_xcode() {
     [ "$OS_TYPE" != "macos" ] && return
-    progress "Setting up Xcode for iOS development"
+    info "Setting up Xcode for iOS development"
     
     if [ ! -d "/Library/Developer/CommandLineTools" ]; then
         info "Installing Xcode Command Line Tools for compilation support"
@@ -324,30 +399,6 @@ install_xcode() {
     fi
 }
 
-setup_development_environment() {
-    msg "Expo Development Environment Setup v$SCRIPT_VERSION" "$CYAN"
-
-    OS_TYPE=$(detect_os)
-    ARCH=$(uname -m)
-    info "Detected system: $OS_TYPE ($ARCH architecture)"
-    
-    check_root
-    
-    # Configure git early to avoid issues
-    configure_git_credentials
-    
-    decrypt_env_if_needed
-
-    install_homebrew
-    install_zsh_via_brew "$@"
-    install_oh_my_zsh
-    install_packages
-    install_xcode
-
-    local elapsed=$(( $(/bin/date +%s 2>/dev/null || echo 0) - START_TIME ))
-    msg "Environment setup complete! Time elapsed: $((elapsed/60))m $((elapsed%60))s" "$GREEN"
-}
-
 load_config() {
     local env_file="$1"
     
@@ -366,53 +417,6 @@ load_config() {
     fi
     
     success "Successfully loaded ${#PROJECTS[@]} project(s) from configuration"
-}
-
-show_project_menu() {
-    msg "Available Expo Projects:" "$CYAN"
-    echo ""
-    
-    local i=1
-    for project in "${PROJECTS[@]}"; do
-        IFS='|' read -r name repo <<< "$project"
-        printf "  %s[%d]%s %s\n" "$YELLOW" "$i" "$NC" "$name"
-        ((i++))
-    done
-    echo ""
-}
-
-get_project_selection() {
-    local selection="$1"
-    
-    if [ -z "$selection" ]; then
-        show_project_menu
-        printf "%sEnter project number: %s" "$CYAN" "$NC"
-        read -r selection
-    fi
-    
-    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt "${#PROJECTS[@]}" ]; then
-        error "Invalid project selection: $selection"
-    fi
-    
-    echo "$selection"
-}
-
-configure_git_credentials() {
-    # Configure git user if not already set
-    if [ -z "$(git config --global user.name)" ]; then
-        local git_user="${GIT_USER_NAME:-$USER}"
-        info "Setting git user name to: $git_user"
-        git config --global user.name "$git_user"
-    fi
-    
-    if [ -z "$(git config --global user.email)" ]; then
-        local git_email="${GIT_USER_EMAIL:-$USER@$(hostname)}"
-        info "Setting git user email to: $git_email"
-        git config --global user.email "$git_email"
-    fi
-    
-    # Configure credential helper to avoid keychain prompts
-    git config --global credential.helper 'cache --timeout=3600'
 }
 
 authenticate_github() {
@@ -521,24 +525,22 @@ create_expo_project() {
     local repo_url="$2"
     
     info "Creating new Expo React Native project: $project_name"
-    
-    # Suppress deprecation warnings
+    info "Suppress deprecation warnings"
     export NODE_NO_WARNINGS=1
     export npm_config_yes=true
     export CI=false
     export EXPO_NO_TELEMETRY=1
     
-    # Create the project, filtering out deprecation warnings for cleaner output
+    info "Create the project, filtering out deprecation warnings for cleaner output"
     yarn create expo-app "$project_name" --template blank 2>&1 | /usr/bin/grep -v "DeprecationWarning" | /usr/bin/grep -v "deprecated" || true
     
-    # Check if the project was actually created
+    info "Check if the project was actually created"
     if [ ! -d "$project_name" ]; then
         error "Failed to create Expo project - directory not found"
     fi
     
     cd "$project_name" || error "Failed to enter project directory"
     
-    # Ensure .gitignore is properly configured before committing
     if [ ! -f ".gitignore" ]; then
         cat > .gitignore << 'EOF'
 node_modules/
@@ -625,37 +627,29 @@ install_and_start() {
     tmux new-session -d -s "$session_name" -c "$project_path"
     tmux send-keys -t "$session_name" "npx expo start -i -a" C-m
     success "Expo server started in tmux session"
-
 }
 
-info "Initializing Expo project launcher..."
-setup_development_environment "$@"
+#------------------------------------------
+# Environment Setup
+#------------------------------------------
+msg "Expo Development Environment Setup v$SCRIPT_VERSION" "$CYAN"
+OS_TYPE=$(detect_os)
+ARCH=$(uname -m)
+info "Detected system: $OS_TYPE ($ARCH architecture)"
+check_root
+install_homebrew
+install_zsh_via_brew_and_switch_to_zsh "$@"
+decrypt_env_if_needed
+configure_git_credentials
+install_oh_my_zsh
+install_packages
+install_xcode
+msg "Environment setup complete!" "$GREEN"
 
-if [ -z "$ZSH_VERSION" ]; then
-    info "Restarting in zsh shell..."
-    exec /bin/zsh "$0" "$@"
-fi
-
+#------------------------------------------
+# Deploy Project
+#------------------------------------------
 load_config "$SCRIPT_DIR/.env"
-
-selection=$(get_project_selection "$PROJECT_SELECTION")
-
-counter=1
-PROJECT_NAME=""
-REPO_URL=""
-for project in "${PROJECTS[@]}"; do
-    if [ "$counter" -eq "$selection" ]; then
-        IFS='|' read -r PROJECT_NAME REPO_URL <<< "$project"
-        break
-    fi
-    ((counter++))
-done
-
-if [ -z "$PROJECT_NAME" ]; then
-    error "Failed to parse project configuration"
-fi
-
-msg "Selected project: $PROJECT_NAME" "$GREEN"
-
+get_or_read_script_arguments "$@"
 setup_project "$PROJECT_NAME" "$REPO_URL"
 install_and_start "$PROJECT_NAME"
