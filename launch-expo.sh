@@ -24,6 +24,7 @@ readonly FORMULA_PACKAGES=(
     "mas:Mac App Store CLI"
     "node:Node.js"
     "yarn:Yarn"
+    "git:Git"
     "git-flow:Git Flow"
     "gh:GitHub CLI"
     "git-crypt:Git Crypt"
@@ -82,7 +83,7 @@ add_to_shell_config() {
 decrypt_env_if_needed() {
     info "Checking for encrypted .env file"
     
-    if [ -f "$SCRIPT_DIR/.env" ] && file "$SCRIPT_DIR/.env" | grep -q "ASCII text"; then
+    if [ -f "$SCRIPT_DIR/.env" ] && file "$SCRIPT_DIR/.env" | /usr/bin/grep -q "ASCII text"; then
         success ".env file already decrypted"
         return 0
     fi
@@ -98,10 +99,14 @@ decrypt_env_if_needed() {
         warn "gpg --full-generate-key"
         warn "get <YOUR_KEY_ID> from 'gpg --list-secret-keys --keyid-format=long'"
         warn "gpg --send-keys --keyserver hkps://keys.openpgp.org <YOUR_KEY_ID>"
-
-        warn: "then have the admin run:"
+        warn "then have the admin run:"
         warn "gpg --keyserver hkps://keys.openpgp.org --search-keys <THEIR_EMAIL>"
         warn "git-crypt add-gpg-user <THEIR_KEY_ID>"
+        cd - >/dev/null
+        # Continue anyway as .env might not be encrypted
+        if [ ! -f "$SCRIPT_DIR/.env" ]; then
+            error "No .env file found and git-crypt failed"
+        fi
     fi
 }
 
@@ -284,7 +289,7 @@ install_xcode() {
     if [ ! -d "/Library/Developer/CommandLineTools" ]; then
         info "Installing Xcode Command Line Tools for compilation support"
         touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-        PROD=$(softwareupdate -l | grep "\*.*Command Line" | tail -n 1 | sed 's/^[^C]* //')
+        PROD=$(softwareupdate -l | /usr/bin/grep "\*.*Command Line" | tail -n 1 | sed 's/^[^C]* //')
         if [ -n "$PROD" ]; then
             softwareupdate -i "$PROD" --verbose || warn "Failed to install Command Line Tools"
         fi
@@ -301,10 +306,21 @@ install_xcode() {
     fi
 
     if [ -d "/Applications/Xcode.app" ]; then
-        info "Configuring Xcode developer tools (admin password required)"
-        sudo xcode-select --switch "/Applications/Xcode.app/Contents/Developer" 2>/dev/null || warn "Could not set Xcode path"
-        sudo xcodebuild -license accept 2>/dev/null || warn "Could not accept Xcode license"
-        success "Xcode development tools configured"
+        # Check if Xcode is already configured
+        if xcode-select -p 2>/dev/null | /usr/bin/grep -q "/Applications/Xcode.app/Contents/Developer"; then
+            success "Xcode developer tools already configured"
+        else
+            info "Configuring Xcode developer tools (may require admin password)"
+            if sudo -n true 2>/dev/null; then
+                # Can use sudo without password
+                sudo xcode-select --switch "/Applications/Xcode.app/Contents/Developer" || warn "Could not set Xcode path"
+                sudo xcodebuild -license accept 2>/dev/null || warn "Could not accept Xcode license"
+            else
+                warn "Xcode configuration requires admin access. Please run:"
+                warn "  sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer"
+                warn "  sudo xcodebuild -license accept"
+            fi
+        fi
     fi
 }
 
@@ -316,6 +332,10 @@ setup_development_environment() {
     info "Detected system: $OS_TYPE ($ARCH architecture)"
     
     check_root
+    
+    # Configure git early to avoid issues
+    configure_git_credentials
+    
     decrypt_env_if_needed
 
     install_homebrew
@@ -377,17 +397,55 @@ get_project_selection() {
     echo "$selection"
 }
 
-authenticate_github() {
-    if [ -n "${GITHUB_TOKEN:-}" ] && [ "$GITHUB_TOKEN" != "ghp_your_personal_access_token_here" ]; then
-        info "Authenticating with GitHub using provided token"
-        echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null || true
+configure_git_credentials() {
+    # Configure git user if not already set
+    if [ -z "$(git config --global user.name)" ]; then
+        local git_user="${GIT_USER_NAME:-$USER}"
+        info "Setting git user name to: $git_user"
+        git config --global user.name "$git_user"
     fi
     
-    if gh auth status >/dev/null 2>&1; then
-        success "GitHub authentication verified"
-        return 0
+    if [ -z "$(git config --global user.email)" ]; then
+        local git_email="${GIT_USER_EMAIL:-$USER@$(hostname)}"
+        info "Setting git user email to: $git_email"
+        git config --global user.email "$git_email"
+    fi
+    
+    # Configure credential helper to avoid keychain prompts
+    git config --global credential.helper 'cache --timeout=3600'
+}
+
+authenticate_github() {
+    # First ensure git credentials are configured
+    configure_git_credentials
+    
+    if [ -n "${GITHUB_TOKEN:-}" ] && [ "$GITHUB_TOKEN" != "ghp_your_personal_access_token_here" ]; then
+        info "Authenticating with GitHub using provided token"
+        
+        # Configure git to use the token for HTTPS operations
+        git config --global url."https://token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+        
+        # Also set up credential helper as backup
+        git config --global credential.https://github.com.username "token"
+        printf "protocol=https\nhost=github.com\nusername=token\npassword=%s\n" "$GITHUB_TOKEN" | git credential-cache store
+        
+        # Configure gh CLI if available
+        echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null || true
+        
+        # Verify the token works
+        if gh auth status >/dev/null 2>&1; then
+            success "GitHub authentication verified"
+            return 0
+        elif curl -s -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user >/dev/null 2>&1; then
+            success "GitHub token validated"
+            return 0
+        else
+            warn "GitHub token may be invalid - pushes might fail"
+            return 1
+        fi
     else
-        warn "GitHub not authenticated - repository will be local only"
+        warn "No GitHub token configured - repository will be local only"
+        warn "Add GITHUB_TOKEN to your .env file to enable GitHub integration"
         return 1
     fi
 }
@@ -401,18 +459,29 @@ setup_git_repository() {
     
     info "Initializing git repository for $project_name"
     
+    # Ensure git credentials are configured before any commits
+    configure_git_credentials
+    
     local repo_name
-    repo_name=$(basename "$repo_url" .git)
+    repo_name="${repo_url##*/}"
+    repo_name="${repo_name%.git}"
     
     if [ ! -d ".git" ]; then
         git init || error "Failed to initialize git repository"
     fi
     
     if ! git rev-parse HEAD >/dev/null 2>&1; then
-        info "Creating initial commit"
-        echo "# $repo_name" > README.md
-        git add README.md
-        git commit -m "Initial commit"
+        info "Creating initial commit with all project files"
+        # Add all files including the Expo project files
+        git add -A
+        git commit -m "Initial commit: Expo project setup"
+    fi
+    
+    # Check for any uncommitted files and commit them
+    if [ -n "$(git status --porcelain)" ]; then
+        info "Adding uncommitted project files"
+        git add -A
+        git commit -m "Add Expo project files"
     fi
     
     git checkout -B "$development_branch"
@@ -425,14 +494,20 @@ setup_git_repository() {
             gh repo create "$repo_name" --public --description "Expo project: $project_name" --clone=false || warn "Could not create remote repo"
         fi
         
+        # Use HTTPS with credential helper configured
         git remote add origin "https://github.com/$github_username/$repo_name.git" 2>/dev/null || true
         
         info "Pushing to GitHub development branch"
-        git push -u origin "$development_branch" 2>/dev/null || warn "Could not push to remote"
+        # Use GIT_TERMINAL_PROMPT=0 to prevent any interactive prompts
+        if ! GIT_TERMINAL_PROMPT=0 git push -q -u origin "$development_branch" 2>/dev/null; then
+            warn "Could not push to remote - check GitHub authentication"
+        fi
         
         info "Creating production branch"
         git checkout -B "$production_branch"
-        git push -u origin "$production_branch" 2>/dev/null || warn "Could not push production branch"
+        if ! GIT_TERMINAL_PROMPT=0 git push -q -u origin "$production_branch" 2>/dev/null; then
+            warn "Could not push production branch"
+        fi
         git checkout "$development_branch"
         
         success "Git repository configured with remote on GitHub"
@@ -447,15 +522,48 @@ create_expo_project() {
     
     info "Creating new Expo React Native project: $project_name"
     
+    # Suppress deprecation warnings
+    export NODE_NO_WARNINGS=1
     export npm_config_yes=true
-    export CI=true
+    export CI=false
     export EXPO_NO_TELEMETRY=1
     
-    if ! yarn create expo-app "$project_name" --template blank; then
-        error "Failed to create Expo project"
+    # Create the project, filtering out deprecation warnings for cleaner output
+    yarn create expo-app "$project_name" --template blank 2>&1 | /usr/bin/grep -v "DeprecationWarning" | /usr/bin/grep -v "deprecated" || true
+    
+    # Check if the project was actually created
+    if [ ! -d "$project_name" ]; then
+        error "Failed to create Expo project - directory not found"
     fi
     
     cd "$project_name" || error "Failed to enter project directory"
+    
+    # Ensure .gitignore is properly configured before committing
+    if [ ! -f ".gitignore" ]; then
+        cat > .gitignore << 'EOF'
+node_modules/
+.expo/
+dist/
+npm-debug.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+web-build/
+
+# macOS
+.DS_Store
+
+# Temporary files created by Metro to check the health of the file watcher
+.metro-health-check*
+
+# testing
+/coverage
+EOF
+    fi
+    
     setup_git_repository "$project_name" "$repo_url"
     cd .. || error "Failed to return to parent directory"
     
@@ -501,7 +609,11 @@ install_and_start() {
     
     if [ ! -d "node_modules" ]; then
         info "Installing project dependencies with Yarn"
-        yarn install || error "Failed to install dependencies"
+        NODE_NO_WARNINGS=1 yarn install 2>&1 | /usr/bin/grep -v "deprecated" | /usr/bin/grep -v "DeprecationWarning" || true
+        # Check if node_modules was actually created
+        if [ ! -d "node_modules" ]; then
+            error "Failed to install dependencies - node_modules not created"
+        fi
         success "All dependencies installed"
     else
         info "Dependencies already installed"
@@ -511,7 +623,7 @@ install_and_start() {
     tmux kill-session -t "$session_name" 2>/dev/null || true
     info "Creating new tmux session: $session_name"
     tmux new-session -d -s "$session_name" -c "$project_path"
-    tmux send-keys -t "$session_name" "npx expo start" C-m
+    tmux send-keys -t "$session_name" "npx expo start -i -a" C-m
     success "Expo server started in tmux session"
 
 }
