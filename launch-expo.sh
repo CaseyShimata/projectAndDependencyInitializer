@@ -27,6 +27,7 @@ readonly FORMULA_PACKAGES=(
     "git-flow:Git Flow"
     "gh:GitHub CLI"
     "git-crypt:Git Crypt"
+    "gnupg:GnuPG"
     "tmux:Terminal Multiplexer"
 )
 
@@ -38,7 +39,6 @@ readonly CASK_PACKAGES=(
     "intellij-idea:IntelliJ IDEA Ultimate"
     "rectangle:Rectangle"
     "iterm2:iTerm2"
-    "gpg-suite:GPG Suite"
 )
 
 readonly NPM_PACKAGES=(
@@ -86,20 +86,22 @@ decrypt_env_if_needed() {
         success ".env file already decrypted"
         return 0
     fi
-    
-    if command -v git-crypt >/dev/null 2>&1; then
-        info "Attempting to unlock git-crypt protected files"
-        cd "$SCRIPT_DIR"
-        if git-crypt unlock 2>/dev/null; then
-            success "Repository unlocked with git-crypt"
-        else
-            warn "Could not unlock repository - ensure you have GPG key configured"
-        fi
+
+    info "Attempting to unlock git-crypt protected files"
+    cd "$SCRIPT_DIR"
+    if git-crypt unlock 2>/dev/null; then
+        success "Repository unlocked with git-crypt"
         cd - >/dev/null
-    fi
-    
-    if [ ! -f "$SCRIPT_DIR/.env" ]; then
-        error ".env file not found - ensure repository is properly decrypted"
+        return 0
+    else
+        warn "Git-crypt unlock failed. run:"
+        warn "gpg --full-generate-key"
+        warn "get <YOUR_KEY_ID> from 'gpg --list-secret-keys --keyid-format=long'"
+        warn "gpg --send-keys --keyserver hkps://keys.openpgp.org <YOUR_KEY_ID>"
+
+        warn: "then have the admin run:"
+        warn "gpg --keyserver hkps://keys.openpgp.org --search-keys <THEIR_EMAIL>"
+        warn "git-crypt add-gpg-user <THEIR_KEY_ID>"
     fi
 }
 
