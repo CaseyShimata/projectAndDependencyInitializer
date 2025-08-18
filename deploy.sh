@@ -2,7 +2,8 @@
 set -eE
 trap 'error "Command failed at line $LINENO: $BASH_COMMAND"' ERR
 
-export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+readonly STANDARD_PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:/opt/homebrew/sbin"
+export PATH="$STANDARD_PATH:$PATH"
 
 readonly SCRIPT_VERSION="1.0.0"
 readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -34,14 +35,10 @@ readonly CASK_PACKAGES=(
     "iterm2:iTerm2"
 )
 
-readonly NPM_PACKAGES=(
-    "expo-cli:expo:Expo CLI"
-)
+readonly NPM_PACKAGES=()
 
 OS_TYPE=""
 ARCH=""
-
-# Initialize script argument variables
 UPGRADE_MODE=""
 PROJECT_NUMBER=""
 PROJECT_NAME=""
@@ -76,7 +73,7 @@ add_to_shell_config() {
 decrypt_env_if_needed() {
     info "Checking for encrypted .env file"
     
-    if [ -f "$SCRIPT_DIR/.env" ] && /usr/bin/file "$SCRIPT_DIR/.env" | /usr/bin/grep -q "ASCII text"; then
+    if [ -f "$SCRIPT_DIR/.env" ] && command -v file >/dev/null && file "$SCRIPT_DIR/.env" | grep -q "ASCII text"; then
         success ".env file already decrypted"
         return 0
     fi
@@ -88,15 +85,7 @@ decrypt_env_if_needed() {
         cd - >/dev/null
         return 0
     else
-        warn "Git-crypt unlock failed. run:"
-        warn "gpg --full-generate-key"
-        warn "get <YOUR_KEY_ID> from 'gpg --list-secret-keys --keyid-format=long'"
-        warn "gpg --send-keys --keyserver hkps://keys.openpgp.org <YOUR_KEY_ID>"
-        warn "then have the admin run:"
-        warn "gpg --keyserver hkps://keys.openpgp.org --search-keys <THEIR_EMAIL>"
-        warn "git-crypt add-gpg-user <THEIR_KEY_ID>"
         cd - >/dev/null
-        # Continue anyway as .env might not be encrypted
         if [ ! -f "$SCRIPT_DIR/.env" ]; then
             error "No .env file found and git-crypt failed"
         fi
@@ -160,9 +149,12 @@ install_zsh_via_brew_and_switch_to_zsh() {
 
     if [ -z "$ZSH_VERSION" ]; then
         info "Switching to zsh for enhanced shell features"
-        exec env PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PATH" /bin/zsh "$0" "$@"
+        # Pass the STANDARD_PATH when switching shells
+        exec env PATH="$STANDARD_PATH:$PATH" STANDARD_PATH="$STANDARD_PATH" /bin/zsh "$0" "$@"
     fi
 
+    # After switching to zsh, ensure PATH includes standard directories
+    export PATH="$STANDARD_PATH:$PATH"
     success "Running in zsh environment"
 }
 
@@ -206,14 +198,10 @@ configure_git_credentials() {
         git config --global user.email "$git_email"
     fi
 
-    # Configure credential helper to avoid keychain prompts
     git config --global credential.helper 'cache --timeout=3600'
 }
 
-get_or_read_script_arguments() {
-    # ALL or NONE approach: provide all required arguments or none for interactive mode
-    # To extend: 1) Update REQUIRED_ARGS_COUNT 2) Handle new arg 3) Add prompt
-    
+get_or_read_script_arguments() {    
     local REQUIRED_ARGS_COUNT=2
     
     if [ $# -gt 0 ] && [ $# -ne $REQUIRED_ARGS_COUNT ]; then
@@ -332,29 +320,33 @@ install_packages() {
     add_to_shell_config "export PATH=\"\$HOME/.yarn-global/bin:\$PATH\""
     export PATH="$HOME/.yarn-global/bin:$PATH"
 
-    for package in "${NPM_PACKAGES[@]}"; do
-        local name="${package%%:*}"
-        local cmd="${package#*:}"
-        cmd="${cmd%:*}"
-        local display="${package##*:}"
-        info "Checking $display"
-        
-        if command -v "$cmd" >/dev/null 2>&1; then
-            if [ "$UPGRADE_MODE" = "2" ]; then
-                info "Upgrading $display to latest version"
-                yarn global upgrade "$name" 2>/dev/null || true
+    if [ ${#NPM_PACKAGES[@]} -gt 0 ] && [[ ! "${NPM_PACKAGES[0]}" =~ ^#.*$ ]]; then
+        for package in "${NPM_PACKAGES[@]}"; do
+            local name="${package%%:*}"
+            local cmd="${package#*:}"
+            cmd="${cmd%:*}"
+            local display="${package##*:}"
+            info "Checking $display"
+            
+            if command -v "$cmd" >/dev/null 2>&1; then
+                if [ "$UPGRADE_MODE" = "2" ]; then
+                    info "Upgrading $display to latest version"
+                    yarn global upgrade "$name" 2>/dev/null || true
+                else
+                    success "$display is installed"
+                fi
             else
-                success "$display is installed"
+                info "Installing $display globally"
+                if yarn global add "$name"; then
+                    success "$display installed successfully"
+                else
+                    warn "Failed to install $display - may need manual installation"
+                fi
             fi
-        else
-            info "Installing $display globally"
-            if yarn global add "$name"; then
-                success "$display installed successfully"
-            else
-                warn "Failed to install $display - may need manual installation"
-            fi
-        fi
-    done
+        done
+    else
+        info "No global NPM packages to install - using npx for Expo tools"
+    fi
 }
 
 install_xcode() {
@@ -364,7 +356,7 @@ install_xcode() {
     if [ ! -d "/Library/Developer/CommandLineTools" ]; then
         info "Installing Xcode Command Line Tools for compilation support"
         touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress
-        PROD=$(softwareupdate -l | /usr/bin/grep "\*.*Command Line" | tail -n 1 | sed 's/^[^C]* //')
+        PROD=$(softwareupdate -l | grep "\*.*Command Line" | tail -n 1 | sed 's/^[^C]* //')
         if [ -n "$PROD" ]; then
             softwareupdate -i "$PROD" --verbose || warn "Failed to install Command Line Tools"
         fi
@@ -381,19 +373,15 @@ install_xcode() {
     fi
 
     if [ -d "/Applications/Xcode.app" ]; then
-        # Check if Xcode is already configured
-        if xcode-select -p 2>/dev/null | /usr/bin/grep -q "/Applications/Xcode.app/Contents/Developer"; then
+        if xcode-select -p 2>/dev/null | grep -q "/Applications/Xcode.app/Contents/Developer"; then
             success "Xcode developer tools already configured"
         else
             info "Configuring Xcode developer tools (may require admin password)"
             if sudo -n true 2>/dev/null; then
-                # Can use sudo without password
                 sudo xcode-select --switch "/Applications/Xcode.app/Contents/Developer" || warn "Could not set Xcode path"
                 sudo xcodebuild -license accept 2>/dev/null || warn "Could not accept Xcode license"
             else
-                warn "Xcode configuration requires admin access. Please run:"
-                warn "  sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer"
-                warn "  sudo xcodebuild -license accept"
+                warn "Xcode configuration requires admin access"
             fi
         fi
     fi
@@ -420,23 +408,16 @@ load_config() {
 }
 
 authenticate_github() {
-    # First ensure git credentials are configured
     configure_git_credentials
     
     if [ -n "${GITHUB_TOKEN:-}" ] && [ "$GITHUB_TOKEN" != "ghp_your_personal_access_token_here" ]; then
         info "Authenticating with GitHub using provided token"
         
-        # Configure git to use the token for HTTPS operations
         git config --global url."https://token:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
-        
-        # Also set up credential helper as backup
         git config --global credential.https://github.com.username "token"
         printf "protocol=https\nhost=github.com\nusername=token\npassword=%s\n" "$GITHUB_TOKEN" | git credential-cache store
-        
-        # Configure gh CLI if available
         echo "$GITHUB_TOKEN" | gh auth login --with-token 2>/dev/null || true
         
-        # Verify the token works
         if gh auth status >/dev/null 2>&1; then
             success "GitHub authentication verified"
             return 0
@@ -462,8 +443,6 @@ setup_git_repository() {
     local production_branch="${GIT_PRODUCTION_BRANCH:-production}"
     
     info "Initializing git repository for $project_name"
-    
-    # Ensure git credentials are configured before any commits
     configure_git_credentials
     
     local repo_name
@@ -476,12 +455,10 @@ setup_git_repository() {
     
     if ! git rev-parse HEAD >/dev/null 2>&1; then
         info "Creating initial commit with all project files"
-        # Add all files including the Expo project files
         git add -A
         git commit -m "Initial commit: Expo project setup"
     fi
     
-    # Check for any uncommitted files and commit them
     if [ -n "$(git status --porcelain)" ]; then
         info "Adding uncommitted project files"
         git add -A
@@ -498,20 +475,14 @@ setup_git_repository() {
             gh repo create "$repo_name" --public --description "Expo project: $project_name" --clone=false || warn "Could not create remote repo"
         fi
         
-        # Use HTTPS with credential helper configured
         git remote add origin "https://github.com/$github_username/$repo_name.git" 2>/dev/null || true
         
         info "Pushing to GitHub development branch"
-        # Use GIT_TERMINAL_PROMPT=0 to prevent any interactive prompts
-        if ! GIT_TERMINAL_PROMPT=0 git push -q -u origin "$development_branch" 2>/dev/null; then
-            warn "Could not push to remote - check GitHub authentication"
-        fi
+        GIT_TERMINAL_PROMPT=0 git push -q -u origin "$development_branch" 2>/dev/null || warn "Could not push to remote - check GitHub authentication"
         
         info "Creating production branch"
         git checkout -B "$production_branch"
-        if ! GIT_TERMINAL_PROMPT=0 git push -q -u origin "$production_branch" 2>/dev/null; then
-            warn "Could not push production branch"
-        fi
+        GIT_TERMINAL_PROMPT=0 git push -q -u origin "$production_branch" 2>/dev/null || warn "Could not push production branch"
         git checkout "$development_branch"
         
         success "Git repository configured with remote on GitHub"
@@ -520,88 +491,44 @@ setup_git_repository() {
     fi
 }
 
-create_expo_project() {
-    local project_name="$1"
-    local repo_url="$2"
-    
-    info "Creating new Expo React Native project: $project_name"
-    info "Suppress deprecation warnings"
-    export NODE_NO_WARNINGS=1
-    export npm_config_yes=true
-    export CI=false
-    export EXPO_NO_TELEMETRY=1
-    
-    info "Create the project, filtering out deprecation warnings for cleaner output"
-    yarn create expo-app "$project_name" --template blank 2>&1 | /usr/bin/grep -v "DeprecationWarning" | /usr/bin/grep -v "deprecated" || true
-    
-    info "Check if the project was actually created"
-    if [ ! -d "$project_name" ]; then
-        error "Failed to create Expo project - directory not found"
-    fi
-    
-    cd "$project_name" || error "Failed to enter project directory"
-    
-    if [ ! -f ".gitignore" ]; then
-        cat > .gitignore << 'EOF'
-node_modules/
-.expo/
-dist/
-npm-debug.*
-*.jks
-*.p8
-*.p12
-*.key
-*.mobileprovision
-*.orig.*
-web-build/
-
-# macOS
-.DS_Store
-
-# Temporary files created by Metro to check the health of the file watcher
-.metro-health-check*
-
-# testing
-/coverage
-EOF
-    fi
-    
-    setup_git_repository "$project_name" "$repo_url"
-    cd .. || error "Failed to return to parent directory"
-    
-    success "Expo project created and initialized"
-}
-
 setup_project() {
     local project_name="$1"
     local repo_url="$2"
-    
-    local sub_projects_dir="$SCRIPT_DIR/subProjects"
-    if [ ! -d "$sub_projects_dir" ]; then
-        info "Creating subProjects directory for project storage"
-        mkdir -p "$sub_projects_dir" || error "Failed to create subProjects directory"
-    fi
-    
-    cd "$sub_projects_dir" || error "Failed to enter subProjects directory"
-    
+    local projects_dir="$HOME/Desktop/projects"
+    cd "$projects_dir" || error "Failed to enter projects directory"
+
     if [ -d "$project_name" ]; then
         success "Project $project_name already exists locally"
         return 0
     fi
-    
+
     if git ls-remote "$repo_url" >/dev/null 2>&1; then
         info "Repository exists - cloning from $repo_url"
         git clone "$repo_url" "$project_name" || error "Failed to clone repository"
         success "Project cloned successfully"
     else
-        info "Repository not found - creating new project"
-        create_expo_project "$project_name" "$repo_url"
+        info "Repository not found - creating new project: $project_name"
+        npx --yes create-expo-app@latest "$project_name" --template blank
+        
+        if [ ! -d "$project_name" ]; then
+            error "Failed to create project directory $project_name"
+        fi
+        
+        success "Project directory created successfully"
+        cd "$project_name" || error "Failed to enter project directory"
+        rm -rf package-lock.json node_modules
+        yarn install
+        npx expo install --fix
+
+        setup_git_repository "$project_name" "$repo_url"
+        cd .. || error "Failed to return to parent directory"
+        success "Expo project created and initialized"
     fi
 }
 
 install_and_start() {
     local project_name="$1"
-    local project_path="$SCRIPT_DIR/subProjects/$project_name"
+    local project_path="$HOME/Desktop/projects/$project_name"
     
     if [ ! -d "$project_path" ]; then
         error "Project directory not found: $project_path"
@@ -610,18 +537,22 @@ install_and_start() {
     cd "$project_path" || error "Failed to enter project directory"
     
     if [ ! -d "node_modules" ]; then
-        info "Installing project dependencies with Yarn"
-        NODE_NO_WARNINGS=1 yarn install 2>&1 | /usr/bin/grep -v "deprecated" | /usr/bin/grep -v "DeprecationWarning" || true
-        # Check if node_modules was actually created
+        info "Installing project dependencies"
+        NODE_NO_WARNINGS=1 yarn install
+        
         if [ ! -d "node_modules" ]; then
             error "Failed to install dependencies - node_modules not created"
         fi
         success "All dependencies installed"
     else
-        info "Dependencies already installed"
+        info "Dependencies already installed - checking for updates"
+        if [ "package.json" -nt "node_modules" ]; then
+            info "package.json has been updated, reinstalling dependencies"
+            NODE_NO_WARNINGS=1 yarn install
+        fi
     fi
 
-    local session_name="expo-$project_name"
+    local session_name="$project_name"
     tmux kill-session -t "$session_name" 2>/dev/null || true
     info "Creating new tmux session: $session_name"
     tmux new-session -d -s "$session_name" -c "$project_path"
