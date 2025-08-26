@@ -23,6 +23,30 @@ readonly FORMULA_PACKAGES=(
     "git-crypt:Git Crypt"
     "gnupg:GnuPG"
     "tmux:Terminal Multiplexer"
+    "zsh:Z Shell"
+    "vim:Vim Editor"
+    "xclip:X11 Clipboard"
+    "qemu:QEMU Virtualizer"
+    "lima:Lima VM"
+    "colima:Colima Container Runtime"
+    "lima-additional-guestagents:Lima Guest Agents"
+    "docker:Docker CLI"
+    "docker-buildx:Docker Buildx"
+    "kubernetes-cli:Kubernetes CLI"
+    "yq:YAML Processor"
+    "jq:JSON Processor"
+    "rsync:Rsync File Sync"
+    "skaffold:Skaffold K8s Tool"
+    "awscli:AWS CLI"
+    "gettext:GNU Gettext"
+    "helm:Helm K8s Package Manager"
+    "kustomize:Kustomize K8s Tool"
+    "instantclient-basic:Oracle Instant Client Basic"
+    "instantclient-sdk:Oracle Instant Client SDK"
+    "instantclient-tools:Oracle Instant Client Tools"
+    "instantclient-sqlplus:Oracle SQL*Plus"
+    "tfenv:Terraform Version Manager"
+    "fastlane:Fastlane Deployment"
 )
 
 readonly CASK_PACKAGES=(
@@ -33,9 +57,15 @@ readonly CASK_PACKAGES=(
     "intellij-idea:IntelliJ IDEA Ultimate"
     "rectangle:Rectangle"
     "iterm2:iTerm2"
+    "powershell:PowerShell"
 )
 
-readonly NPM_PACKAGES=()
+readonly NPM_PACKAGES=(
+    "@nestjs/cli:nest:NestJS CLI"
+    "eas-cli:eas:Expo Application Services CLI"
+    "create-expo-app:create-expo-app:Create Expo App"
+    "typescript:tsc:TypeScript Compiler"
+)
 
 OS_TYPE=""
 ARCH=""
