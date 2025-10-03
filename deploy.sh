@@ -203,7 +203,7 @@ install_oh_my_zsh() {
     local zshrc="$HOME/.zshrc"
     if [ -f "$zshrc" ]; then
         info "Configuring zsh theme and plugins"
-        sed -i.bak 's/ZSH_THEME="robbyrussell"/ZSH_THEME="agnoster"/' "$zshrc" 2>/dev/null || true
+        sed -i.bak 's/ZSH_THEME="ys"/ZSH_THEME="ys"/' "$zshrc" 2>/dev/null || true
         
         local plugins="plugins=(git brew node npm yarn"
         [ "$OS_TYPE" = "macos" ] && plugins="$plugins macos"
